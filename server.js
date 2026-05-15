@@ -1,59 +1,3 @@
-/**
- * PPKPRO - Railway Backend (Node.js)
- * 
- * SETUP:
- * 1. npm init -y
- * 2. npm install express dotenv axios
- * 3. Create .env dengan variables di bawah
- * 4. Push ke GitHub
- * 5. Connect ke Railway via dashboard
- * 6. Set environment variables di Railway
- * 7. Deploy
- */
-
-// ==================== PACKAGE.JSON ====================
-/**
-{
-  "name": "ppkpro-backend",
-  "version": "1.0.0",
-  "description": "PPKPro Railway Backend",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "dotenv": "^16.0.3",
-    "axios": "^1.4.0"
-  }
-}
-*/
-
-// ==================== .ENV EXAMPLE ====================
-/**
-PORT=3000
-NODE_ENV=production
-
-# Claude API
-CLAUDE_API_KEY=sk-ant-xxx
-
-# Midtrans (Sandbox first, then production)
-MIDTRANS_SERVER_KEY=Mid-server-xxx
-MIDTRANS_CLIENT_KEY=Mid-client-xxx
-
-# GAS Callback
-GAS_CALLBACK_URL=https://script.google.com/macros/d/[SCRIPT_ID]/userweb
-GAS_CALLBACK_SECRET=PPKPRO_WEBHOOK_SECRET_2026
-
-# Google Drive API (optional, if saving directly from backend)
-GOOGLE_SERVICE_ACCOUNT_KEY={}
-
-# Logging
-LOG_LEVEL=info
-*/
-
-// ==================== SERVER.JS ====================
 const express = require('express');
 const dotenv = require('dotenv');
 const axios = require('axios');
@@ -76,7 +20,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    version: '1.0.0'
+    version: '2.0.0'
   });
 });
 
@@ -104,7 +48,7 @@ app.post('/api/generate', async (req, res) => {
 
     console.log(`[${new Date().toISOString()}] 🚀 Starting generation for job: ${jobID}`);
 
-    // Update job status: processing (0%)
+    // Update job status: processing (5%)
     await callGASCallback(callbackURL, {
       jobID,
       email,
@@ -116,6 +60,7 @@ app.post('/api/generate', async (req, res) => {
     // STEP 1: Extract KAK menggunakan Claude
     console.log(`[${jobID}] Extracting KAK structure...`);
     const kakExtraction = await callClaudeAPI('haiku', buildPromptExtractKAK(kak), 4000);
+    
     await callGASCallback(callbackURL, {
       jobID,
       email,
@@ -125,19 +70,15 @@ app.post('/api/generate', async (req, res) => {
     });
 
     // STEP 2-11: Generate Document Sections
-    console.log(`[${jobID}] Generating document sections (11 calls)...`);
+    console.log(`[${jobID}] Generating document sections...`);
     
     const sections = [];
     const prompts = buildAllPrompts(kak, details, kakExtraction);
     
-    // Call 0: Haiku (extract)
-    // Calls 1-2: Sonnet (complex sections)
-    // Calls 3-10: Haiku (simpler sections)
-    
     let progress = 20;
     for (const [index, prompt] of prompts.entries()) {
       const model = [0, 1, 2, 8].includes(index) ? 'sonnet' : 'haiku';
-      const maxTokens = [0, 1, 2, 8].includes(index) ? 16000 : 8000;
+      const maxTokens = [0, 1, 2, 8].includes(index) ? 16000 : 4096;
       
       try {
         const response = await callClaudeAPI(model, prompt, maxTokens);
@@ -163,21 +104,13 @@ app.post('/api/generate', async (req, res) => {
       }
     }
 
-    // STEP 3: Convert to DOCX
-    console.log(`[${jobID}] Converting to DOCX format...`);
-    // TODO: Implement DOCX generation from Claude sections
-    // For now, just create placeholder
-    const docxBuffer = Buffer.from('Placeholder DOCX content');
-    const driveLink = 'https://drive.google.com/file/d/placeholder/view'; // Will be replaced with actual upload
-
-    // STEP 4: Final callback - Done
+    // STEP 3: Final callback - Done
     console.log(`[${jobID}] Job completed successfully!`);
     await callGASCallback(callbackURL, {
       jobID,
       email,
       status: 'done',
       progress: 100,
-      driveLink,
       callbackSecret
     });
 
@@ -185,7 +118,7 @@ app.post('/api/generate', async (req, res) => {
       success: true,
       jobID,
       sectionsGenerated: sections.length,
-      message: 'Generation started'
+      message: 'Generation completed'
     });
 
   } catch (error) {
@@ -215,7 +148,6 @@ app.post('/api/generate', async (req, res) => {
 app.get('/api/status/:jobID', (req, res) => {
   const { jobID } = req.params;
   
-  // TODO: Query job status from database (in-memory for now)
   const job = global.jobs?.[jobID] || {
     status: 'not_found',
     progress: 0
@@ -227,53 +159,18 @@ app.get('/api/status/:jobID', (req, res) => {
   });
 });
 
-/**
- * Midtrans Payment Webhook (optional, implement if needed)
- */
-app.post('/webhook/midtrans', (req, res) => {
-  try {
-    const {
-      order_id,
-      status_code,
-      gross_amount,
-      payment_type,
-      transaction_status
-    } = req.body;
-
-    console.log(`[Midtrans] Order ${order_id}: ${transaction_status}`);
-
-    // TODO: Verify signature
-    // const hash = crypto.createHash('sha512')
-    //   .update(order_id + status_code + gross_amount + MIDTRANS_KEY)
-    //   .digest('hex');
-    // if (hash !== req.query.signature) throw new Error('Invalid signature');
-
-    // Update order status
-    if (transaction_status === 'settlement') {
-      // Call GAS to confirm payment
-      console.log(`[Midtrans] Payment confirmed for ${order_id}`);
-      // TODO: POST to GAS confirmPayment endpoint
-    }
-
-    res.json({ ok: true });
-
-  } catch (error) {
-    console.error('❌ Midtrans webhook error:', error);
-    res.status(400).json({ error: error.message });
-  }
-});
-
 // ==================== CLAUDE API CALLS ====================
 
 async function callClaudeAPI(model, prompt, maxTokens) {
   try {
     const MODEL_MAP = {
-  'sonnet': 'claude-3-5-sonnet-20241022',
-  'haiku': 'claude-3-5-haiku-20241022'
-};
+      'sonnet': 'claude-3-5-sonnet-20241022',
+      'haiku': 'claude-3-5-haiku-20241022'
+    };
 
-// Ganti di function callClaudeAPI:
-const modelString = MODEL_MAP[model] || 'claude-3-5-haiku-20241022';
+    const modelString = MODEL_MAP[model] || 'claude-3-5-haiku-20241022';
+    
+    console.log(`[API] Calling ${modelString} with ${maxTokens} max_tokens`);
     
     const response = await axios.post(
       'https://api.anthropic.com/v1/messages',
@@ -307,64 +204,50 @@ const modelString = MODEL_MAP[model] || 'claude-3-5-haiku-20241022';
 // ==================== PROMPT BUILDERS ====================
 
 function buildPromptExtractKAK(kak) {
-  return `
-Extract struktur dari KAK berikut dalam format JSON:
+  return `Extract struktur dari KAK berikut dalam format JSON:
 
 KAK:
 ${kak}
 
 Return HANYA JSON valid dengan struktur:
 {
-  "jenisPekerjaan": "string (DED/Pengawasan/Lainnya)",
-  "durasi": "string (timeline pelaksanaan)",
-  "outputExpected": "string (hasil yang diharapkan)",
-  "tahapanUtama": ["array of main phases"],
-  "deliverables": ["array of specific outputs"]
-}
-`;
+  "jenisPekerjaan": "string",
+  "durasi": "string",
+  "outputExpected": "string",
+  "tahapanUtama": [],
+  "deliverables": []
+}`;
 }
 
 function buildAllPrompts(kak, details, kakExtraction) {
-  /**
-   * Build 11 prompts untuk 11 Claude calls
-   * Ini adalah template dasar - customize sesuai kebutuhan
-   */
-  
   const prompts = [
-    // Call 0: Extract KAK (already done, return cached)
     buildPromptExtractKAK(kak),
     
-    // Call 1: Bab 1.1 Pemahaman (Sonnet)
     `Generate Bab 1.1 Pemahaman Atas Pekerjaan (6-8 halaman) untuk:
-     
-Pekerjaan: ${details.namaPaket}
-Instansi: ${details.instansi}
-Lokasi: ${details.lokasi}
+Pekerjaan: ${details?.namaPaket || 'Konsultasi'}
+Instansi: ${details?.instansi || 'Pemerintah'}
+Lokasi: ${details?.lokasi || 'Unspecified'}
 
 KAK:
 ${kak}
 
-Output harus professional, terstruktur, dengan sub-bab yang jelas. Format: Markdown atau plain text dengan heading yang jelas.`,
+Output harus professional, terstruktur, dengan sub-bab yang jelas.`,
     
-    // Call 2: Bab 1.2 Metodologi (Sonnet)
-    `Generate Bab 1.2 Metodologi & QC (10-15 halaman) untuk pekerjaan konsultasi dengan KAK di atas.
-    
+    `Generate Bab 1.2 Metodologi & QC (10-15 halaman) untuk pekerjaan konsultasi.
 Sertakan:
 - Tahapan pelaksanaan detail
 - Metodologi kerja
 - Quality Control process
 - Risk mitigation
-- Timeline Gantt chart
-`,
+- Timeline Gantt chart`,
     
-    // Calls 3-10: Simpler sections (Haiku)
-    `Generate ringkas deliverable checklist untuk pekerjaan ini (2-3 halaman)`,
-    `Generate resource plan & budget allocation (2 halaman)`,
-    `Generate team competency matrix (2 halaman)`,
-    `Generate compliance checklist dengan Perpres 46/2025 (2 halaman)`,
+    `Generate deliverable checklist (2-3 halaman)`,
+    `Generate resource plan & budget (2 halaman)`,
+    `Generate competency matrix (2 halaman)`,
+    `Generate compliance checklist Perpres 46/2025 (2 halaman)`,
     `Generate assumptions & dependencies (1-2 halaman)`,
     `Generate success criteria & KPI (1-2 halaman)`,
-    `Generate appendix dengan template form yang diperlukan (2-3 halaman)`,
+    `Generate appendix dengan template form (2-3 halaman)`
   ];
 
   return prompts;
@@ -373,9 +256,6 @@ Sertakan:
 // ==================== UTILITIES ====================
 
 async function callGASCallback(callbackURL, payload) {
-  /**
-   * Call GAS webhook untuk update job status
-   */
   if (!callbackURL) return;
 
   try {
@@ -391,13 +271,11 @@ async function callGASCallback(callbackURL, payload) {
     );
     console.log(`✅ GAS callback sent for job ${payload.jobID}`);
   } catch (error) {
-    // Log but don't fail - GAS will retry via polling
     console.warn(`⚠️ GAS callback timeout (will retry): ${error.message}`);
   }
 }
 
 function estimateTokens(text) {
-  // Rough estimate: 1 token ≈ 4 characters
   return Math.ceil(text.length / 4);
 }
 
@@ -416,7 +294,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
-║     PPKPRO Backend v1.0.0              ║
+║     USTEKPRO Backend v2.0.0            ║
 ║     Running on port ${PORT}              ║
 ║     Node env: ${process.env.NODE_ENV}     ║
 ╚════════════════════════════════════════╝
