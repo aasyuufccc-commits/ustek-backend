@@ -170,7 +170,7 @@ app.get('/api/status/:jobID', (req, res) => {
 async function callGeminiAPI(modelType, prompt) {
   try {
     // Alokasi model berdasarkan bobot dokumen
-    const modelString = (modelType === 'sonnet') ? 'gemini-1.5-pro' : 'gemini-2.5-flash';
+    const modelString = (modelType === 'sonnet') ? 'gemini-1.5-pro-latest' : 'gemini-2.5-flash';
     
     console.log(`[API] Calling Google Gen AI: ${modelString}`);
     
