@@ -1,32 +1,36 @@
 const express = require('express');
 const axios = require('axios');
+const { buildBabDocx } = require('./lib/docxBuilder');
+const { kirimBabKeGAS } = require('./lib/gasCallback');
 
 const app = express();
-// Mengizinkan payload besar (sampai 50MB) karena teks KAK bisa sangat panjang
 app.use(express.json({ limit: '50mb' }));
 
 const PORT = process.env.PORT || 8080;
+const GAS_CALLBACK_URL = process.env.GAS_CALLBACK_URL || '';
+
+// Job tracking
+const jobStatus = {};
 
 // ==========================================
 // FUNGSI 1: Callback Laporan ke Google Apps Script
 // ==========================================
 async function callGASCallback(url, payload) {
   try {
-    console.log(`📤 [CALLBACK] Sending to: ${url}`);
-    console.log(`📦 [CALLBACK] Payload: ${JSON.stringify(payload, null, 2)}`);
+    console.log(`📤 [CALLBACK] Sending to: ${url.substring(0, 80)}...`);
     
     const response = await axios.post(url, payload, {
       headers: {
         'Content-Type': 'application/json'
       },
-      timeout: 5000
+      timeout: 10000
     });
     
     console.log(`✅ [CALLBACK] Status ${response.status}: Berhasil!`);
+    return true;
   } catch (error) {
-    console.error(`❌ [CALLBACK] GAGAL ke ${url}`);
-    console.error(`❌ [CALLBACK] Status: ${error.response?.status}`);
-    console.error(`❌ [CALLBACK] Error: ${error.message}`);
+    console.error(`❌ [CALLBACK] GAGAL: ${error.message}`);
+    return false;
   }
 }
 
@@ -40,7 +44,6 @@ function estimateTokens(text) {
 async function callAIWithFallback(modelType, prompt) {
   try {
     // 🥇 OPSI UTAMA: CLAUDE
-    // Sonnet untuk bab analisa berat, Haiku untuk bab ringan/jadwal
     const claudeModel = (modelType === 'sonnet') 
       ? 'claude-sonnet-4-20250514' 
       : 'claude-3-5-haiku-20241022';
@@ -72,7 +75,7 @@ async function callAIWithFallback(modelType, prompt) {
     }
 
   } catch (claudeError) {
-    console.warn(`⚠️ [API Warning] Claude gagal (${claudeError.message}). Mengalihkan ke Gemini (Fallback)...`);
+    console.warn(`⚠️ Claude gagal (${claudeError.message}). Mengalihkan ke Gemini...`);
     
     // 🥈 OPSI CADANGAN: GEMINI
     try {
@@ -102,9 +105,6 @@ async function callAIWithFallback(modelType, prompt) {
         }
       );
 
-      // ⏱️ JEDA 2 DETIK: Penahan agar terhindar dari Error 429 Too Many Requests Google
-      await new Promise(resolve => setTimeout(resolve, 2000));
-
       const geminiText = geminiResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
       
       if (geminiText) {
@@ -115,14 +115,14 @@ async function callAIWithFallback(modelType, prompt) {
       }
       
     } catch (geminiError) {
-      console.error(`❌ [Fatal Error] Claude DAN Gemini sama-sama gagal!`);
-      throw new Error(`Sistem Failover Gagal. Error Akhir: ${geminiError.message}`);
+      console.error(`❌ Claude DAN Gemini sama-sama gagal!`);
+      throw new Error(`Sistem Failover Gagal: ${geminiError.message}`);
     }
   }
 }
 
 // ==========================================
-// FUNGSI 3: Pembentuk Prompt 10 Bab (Array Murni)
+// FUNGSI 3: Pembentuk Prompt 10 Bab
 // ==========================================
 function buildAllPrompts(kak, details, kakExtraction) {
   return [
@@ -155,40 +155,67 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    version: '2.1.0',
+    version: '2.2.0',
     ai_primary: 'Claude',
-    ai_fallback: 'Gemini'
+    ai_fallback: 'Gemini',
+    gas_callback: GAS_CALLBACK_URL ? 'configured' : 'NOT configured'
   });
+});
+
+// ==========================================
+// STATUS ENDPOINT
+// ==========================================
+app.get('/api/status/:jobID', (req, res) => {
+  const status = jobStatus[req.params.jobID];
+  if (!status) {
+    return res.json({
+      jobID: req.params.jobID,
+      status: 'not_found',
+      message: 'Job tidak ditemukan'
+    });
+  }
+  res.json(status);
 });
 
 // ==========================================
 // ENDPOINT UTAMA: POST /api/generate
 // ==========================================
 app.post('/api/generate', async (req, res) => {
-  const { kak, details, callbackURL, jobID } = req.body;
+  const { jobID, kak, details, callbackURL } = req.body;
 
-  if (!kak || !callbackURL || !jobID) {
+  if (!jobID || !kak || !callbackURL) {
     return res.status(400).json({ 
-      error: 'Data tidak lengkap. Pastikan kak, callbackURL, dan jobID terisi.' 
+      error: 'Data tidak lengkap. Pastikan jobID, kak, dan callbackURL terisi.' 
     });
   }
 
-  // 1. LANGSUNG KIRIM STATUS 200 OK ke GAS agar tidak Timeout
+  // 1. LANGSUNG KIRIM STATUS 200 OK
   res.status(200).json({
     success: true,
     jobID: jobID,
-    message: "Generation started in background via Claude+Gemini Fallback"
+    message: "Generation started in background"
   });
 
   console.log(`\n[${jobID}] 🚀 Memulai tugas pembuatan dokumen...`);
 
-  // 2. PROSES LATAR BELAKANG DIMULAI (Tidak menunggu response)
+  // Initialize status
+  jobStatus[jobID] = {
+    jobID: jobID,
+    status: 'processing',
+    progress: 0,
+    bahs: []
+  };
+
+  // 2. PROSES LATAR BELAKANG (Tidak menunggu response)
   (async () => {
     try {
       // Ekstrak KAK terlebih dahulu
       console.log(`[${jobID}] 📖 Mengekstrak struktur KAK...`);
       const extractPrompt = `Ekstrak poin-poin paling krusial, tujuan, ruang lingkup, dan deliverables dari KAK berikut:\n${kak}`;
       const kakExtraction = await callAIWithFallback('haiku', extractPrompt);
+
+      jobStatus[jobID].progress = 5;
+      jobStatus[jobID].status = 'extracting';
 
       // Kirim callback progress awal
       await callGASCallback(callbackURL, {
@@ -199,7 +226,6 @@ app.post('/api/generate', async (req, res) => {
       });
 
       const prompts = buildAllPrompts(kak, details, kakExtraction);
-      const sections = [];
       let progress = 10;
 
       // Looping Eksekusi Bab 0 sampai 9
@@ -209,50 +235,70 @@ app.post('/api/generate', async (req, res) => {
         
         try {
           console.log(`[${jobID}] 📝 Memproses Bab ${index} (${modelType})...`);
+          jobStatus[jobID].status = 'generating';
+          jobStatus[jobID].currentBab = index;
+
           const content = await callAIWithFallback(modelType, prompt);
           
-          sections.push({
-            sectionId: index,
-            content: content,
-            tokensUsed: estimateTokens(content)
-          });
-          
-          // Naikkan persentase & laporkan ke GAS
-          progress += 8;
-          console.log(`[${jobID}] ✅ Bab ${index} selesai (${estimateTokens(content)} tokens).`);
-          
+          // Build DOCX
+          console.log(`[${jobID}] 🔨 Building DOCX for Bab ${index}...`);
+          const docxBuffer = await buildBabDocx(
+            { num: index, nama: `Bab ${index}` },
+            content,
+            details
+          );
+          const docxBase64 = docxBuffer.toString('base64');
+
+          // Kirim ke GAS
           await callGASCallback(callbackURL, {
             jobID: jobID,
             status: 'progress',
             progress: progress,
-            message: `Bab ${index} berhasil diselesaikan.`
+            message: `Bab ${index} berhasil di-generate`,
+            babNum: index,
+            babNama: `Bab ${index}`,
+            docxBase64: docxBase64
           });
+
+          jobStatus[jobID].bahs.push({
+            num: index,
+            status: 'done',
+            tokens: estimateTokens(content)
+          });
+
+          progress += 8;
+          console.log(`[${jobID}] ✅ Bab ${index} selesai (${estimateTokens(content)} tokens).`);
 
         } catch (sectionError) {
           console.error(`[${jobID}] ❌ Gagal di Bab ${index}: ${sectionError.message}`);
-          // Tetap lanjut ke bab berikutnya walaupun ada yang error (Graceful Degradation)
+          jobStatus[jobID].bahs.push({
+            num: index,
+            status: 'error',
+            error: sectionError.message
+          });
           
+          // Kirim error callback tapi continue ke bab berikutnya
           await callGASCallback(callbackURL, {
             jobID: jobID,
             status: 'progress',
             progress: progress,
-            message: `⚠️ Bab ${index} gagal diproses, lanjut ke bab berikutnya.`
+            message: `⚠️ Bab ${index} error, lanjut ke bab berikutnya`
           });
         }
       }
 
-      // 3. FINAL CALLBACK (Semua Bab Selesai, Kirim Hasil ke GAS)
-      console.log(`[${jobID}] ✨ Seluruh dokumen selesai! Mengirim data ke Google Drive...`);
+      // 3. FINAL CALLBACK
+      console.log(`[${jobID}] ✨ Seluruh dokumen selesai!`);
       
+      jobStatus[jobID].status = 'completed';
+      jobStatus[jobID].progress = 100;
+
       await callGASCallback(callbackURL, {
         jobID: jobID,
         status: 'completed',
         progress: 100,
-        result: { 
-          sections: sections,
-          totalTokens: sections.reduce((sum, s) => sum + s.tokensUsed, 0),
-          completedAt: new Date().toISOString()
-        }
+        message: 'Semua 10 bab berhasil di-generate!',
+        completedAt: new Date().toISOString()
       });
 
       console.log(`[${jobID}] 🎉 SELESAI! Document generation completed successfully.\n`);
@@ -260,6 +306,9 @@ app.post('/api/generate', async (req, res) => {
     } catch (globalError) {
       console.error(`[${jobID}] 💥 Terjadi Kesalahan Fatal: ${globalError.message}`);
       
+      jobStatus[jobID].status = 'error';
+      jobStatus[jobID].error = globalError.message;
+
       await callGASCallback(callbackURL, {
         jobID: jobID,
         status: 'error',
@@ -287,10 +336,11 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
-║     USTEKPRO Backend v2.1.0            ║
+║     USTEKPRO Backend v2.2.0            ║
 ║     Running on port ${PORT}              ║
 ║     AI: Claude (Primary)              ║
 ║     Fallback: Gemini                   ║
+║     DOCX Builder: Enabled              ║
 ║     Status: ✅ Ready                   ║
 ╚════════════════════════════════════════╝
   `);
