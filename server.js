@@ -189,10 +189,9 @@ async function callClaudeAPI(model, prompt, maxTokens) {
   try {
     // ✅ FIXED: Updated model names to claude-opus-4-1
     const MODEL_MAP = {
-      'sonnet': 'claude-opus-4-1',
-      'haiku': 'claude-opus-4-1'
-    };
-
+  'sonnet': 'claude-sonnet-4-20250514',
+  'haiku': 'claude-3-5-haiku-20241022'
+};
     const modelString = MODEL_MAP[model] || 'claude-opus-4-1';
     
     console.log(`[API] Calling ${modelString} with ${maxTokens} max_tokens`);
