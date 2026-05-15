@@ -267,7 +267,13 @@ app.post('/webhook/midtrans', (req, res) => {
 
 async function callClaudeAPI(model, prompt, maxTokens) {
   try {
-    const modelString = `claude-3-${model}-20240229`;
+    const MODEL_MAP = {
+  'sonnet': 'claude-3-5-sonnet-20241022',
+  'haiku': 'claude-3-5-haiku-20241022'
+};
+
+// Ganti di function callClaudeAPI:
+const modelString = MODEL_MAP[model] || 'claude-3-5-haiku-20241022';
     
     const response = await axios.post(
       'https://api.anthropic.com/v1/messages',
