@@ -212,7 +212,7 @@ async function callClaudeAPI(model, prompt, maxTokens) {
       {
         headers: {
           'x-api-key': process.env.CLAUDE_API_KEY,
-          'anthropic-version': '2023-06-01',
+          'anthropic-version': '2024-06-15',
           'content-type': 'application/json'
         }
       }
