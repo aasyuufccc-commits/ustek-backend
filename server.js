@@ -1,281 +1,27 @@
 const express = require('express');
-const dotenv = require('dotenv');
 const axios = require('axios');
-const { GoogleGenAI } = require('@google/genai'); // ✅ Menggunakan SDK Resmi Google Gen AI
-
-dotenv.config();
+const { GoogleGenAI } = require('@google/genai');
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+// Mengizinkan payload besar (sampai 50MB) karena teks KAK bisa sangat panjang
+app.use(express.json({ limit: '50mb' }));
 
-// Inisialisasi Google Gen AI menggunakan Environment Variable dari Railway
+const PORT = process.env.PORT || 3000;
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// ==================== ROUTES ====================
-
-/**
- * Health Check
- */
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    version: '2.5.0-gemini'
-  });
-});
-
-/**
- * Main: Generate Document
- * Receives job from GAS, orchestrates Gemini API calls
- */
-app.post('/api/generate', async (req, res) => {
+// ==========================================
+// FUNGSI 1: Callback Laporan ke Google Apps Script
+// ==========================================
+async function callGASCallback(url, payload) {
   try {
-    const {
-      jobID,
-      email,
-      paket,
-      kak,
-      details,
-      driveFolderID,
-      callbackURL,
-      callbackSecret
-    } = req.body;
-
-    // Validate
-    if (!jobID || !email || !kak) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
-
-    console.log(`[${new Date().toISOString()}] 🚀 Starting generation for job: ${jobID}`);
-
-    // Update job status: processing (5%)
-    await callGASCallback(callbackURL, {
-      jobID,
-      email,
-      status: 'processing',
-      progress: 5,
-      callbackSecret
-    });
-
-    // STEP 1: Extract KAK menggunakan Gemini 2.5 Flash (Cepat & Akurat)
-    console.log(`[${jobID}] Extracting KAK structure via Gemini...`);
-    const kakExtraction = await callGeminiAPI('haiku', buildPromptExtractKAK(kak));
-    
-    await callGASCallback(callbackURL, {
-      jobID,
-      email,
-      status: 'processing',
-      progress: 15,
-      callbackSecret
-    });
-
-    // STEP 2-11: Generate Document Sections
-    console.log(`[${jobID}] Generating document sections...`);
-    
-    const sections = [];
-    const prompts = buildAllPrompts(kak, details, kakExtraction);
-    
-    let progress = 20;
-    for (const [index, prompt] of prompts.entries()) {
-      // Pemetaan Model Sesuai Project Brief UstekPro:
-      // Indeks [0, 1, 2, 8] membutuhkan akurasi tinggi (Sonnet) -> Diarahkan ke gemini-1.5-pro
-      // Indeks lainnya bersifat faktual/standard (Haiku) -> Diarahkan ke gemini-2.5-flash
-      const modelType = [0, 1, 2, 8].includes(index) ? 'sonnet' : 'haiku';
-      
-      try {
-        const response = await callGeminiAPI(modelType, prompt);
-        sections.push({
-          sectionId: index,
-          content: response,
-          tokensUsed: estimateTokens(response)
-        });
-        
-        progress += 7;
-        console.log(`[${jobID}] Section ${index} done (${modelType === 'sonnet' ? 'gemini-1.5-pro' : 'gemini-2.5-flash'})`);
-        
-        await callGASCallback(callbackURL, {
-          jobID,
-          email,
-          status: 'processing',
-          progress: Math.min(90, progress),
-          callbackSecret
-        });
-      } catch (sectionError) {
-        console.error(`[${jobID}] Section ${index} error:`, sectionError.message);
-        // Continue to next section on error (graceful degradation)
+    await axios.post(url, payload, {
+      headers: {
+        'x-api-key': process.env.GAS_CALLBACK_SECRET || 'PPKPRO_WEBHOOK_SECRET_2026',
+        'Content-Type': 'application/json'
       }
-    }
-
-    // STEP 3: Final callback - Done
-    console.log(`[${jobID}] Job completed successfully!`);
-    await callGASCallback(callbackURL, {
-      jobID,
-      email,
-      status: 'done',
-      progress: 100,
-      callbackSecret
     });
-
-    res.json({
-      success: true,
-      jobID,
-      sectionsGenerated: sections.length,
-      message: 'Generation completed via Google Gemini API'
-    });
-
   } catch (error) {
-    console.error('❌ Generate error:', error);
-    
-    // Callback error status
-    if (req.body.callbackURL) {
-      await callGASCallback(req.body.callbackURL, {
-        jobID: req.body.jobID,
-        email: req.body.email,
-        status: 'error',
-        error: error.message,
-        callbackSecret: req.body.callbackSecret
-      }).catch(err => console.error('Callback error:', err));
-    }
-
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-/**
- * Check Job Status
- */
-app.get('/api/status/:jobID', (req, res) => {
-  const { jobID } = req.params;
-  
-  const job = global.jobs?.[jobID] || {
-    status: 'not_found',
-    progress: 0
-  };
-
-  res.json({
-    jobID,
-    ...job
-  });
-});
-
-// ==================== GOOGLE GEMINI API CALLS ====================
-
-async function callGeminiAPI(modelType, prompt) {
-  try {
-    // ✅ Menggunakan gemini-2.5-pro sebagai model utama karena jalurnya jauh lebih sepi & responsif di tahun 2026
-    const modelString = (modelType === 'sonnet') ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
-    
-    console.log(`[API] Calling Google Gen AI: ${modelString}`);
-    
-    const response = await ai.models.generateContent({
-      model: modelString,
-      contents: prompt,
-    });
-
-    if (response && response.text) {
-      return response.text;
-    } else {
-      throw new Error("Empty response from Gemini API");
-    }
-
-  } catch (error) {
-    // 🔄 MEKANISME RETRY: Jika gemini-2.5-pro sibuk (503), otomatis lempar fallback ke gemini-1.5-pro
-    if (error.message.includes('503') && modelType === 'sonnet') {
-      console.warn(`⚠️ [API Warning] gemini-2.5-pro sibuk, mencoba fallback ke gemini-1.5-pro...`);
-      try {
-        const fallbackResponse = await ai.models.generateContent({
-          model: 'gemini-1.5-pro',
-          contents: prompt,
-        });
-        return fallbackResponse.text;
-      } catch (fallbackError) {
-        throw new Error(`Gemini API Primary & Fallback failed: ${fallbackError.message}`);
-      }
-    }
-    
-    console.error('❌ Gemini API error:', error.message);
-    throw new Error(`Gemini API failed: ${error.message}`);
-  }
-}
-
-// ==================== PROMPT BUILDERS ====================
-
-function buildPromptExtractKAK(kak) {
-  return `Extract struktur dari KAK berikut dalam format JSON:
-
-KAK:
-${kak}
-
-Return HANYA JSON valid dengan struktur:
-{
-  "jenisPekerjaan": "string",
-  "durasi": "string",
-  "outputExpected": "string",
-  "tahapanUtama": [],
-  "deliverables": []
-}`;
-}
-
-function buildAllPrompts(kak, details, kakExtraction) {
-  const prompts = [
-    buildPromptExtractKAK(kak),
-    
-    `Generate Bab 1.1 Pemahaman Atas Pekerjaan (6-8 halaman) untuk:
-Pekerjaan: ${details?.namaPaket || 'Konsultasi'}
-Instansi: ${details?.instansi || 'Pemerintah'}
-Lokasi: ${details?.lokasi || 'Unspecified'}
-
-KAK:
-${kak}
-
-Output harus professional, terstruktur, dengan sub-bab yang jelas.`,
-    
-    `Generate Bab 1.2 Metodologi & QC (10-15 halaman) untuk pekerjaan konsultasi.
-Sertakan:
-- Tahapan pelaksanaan detail
-- Metodologi kerja
-- Quality Control process
-- Risk mitigation
-- Timeline Gantt chart`,
-    
-    `Generate deliverable checklist (2-3 halaman)`,
-    `Generate resource plan & budget (2 halaman)`,
-    `Generate competency matrix (2 halaman)`,
-    `Generate compliance checklist Perpres 46/2025 (2 halaman)`,
-    `Generate assumptions & dependencies (1-2 halaman)`,
-    `Generate success criteria & KPI (1-2 halaman)`,
-    `Generate appendix dengan template form (2-3 halaman)`
-  ];
-
-  return prompts;
-}
-
-// ==================== UTILITIES ====================
-
-async function callGASCallback(callbackURL, payload) {
-  if (!callbackURL) return;
-
-  try {
-    await axios.post(
-      callbackURL,
-      payload,
-      {
-        timeout: 5000,
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    console.log(`✅ GAS callback sent for job ${payload.jobID}`);
-  } catch (error) {
-    console.warn(`⚠️ GAS callback timeout (will retry): ${error.message}`);
+    console.error(`❌ Gagal mengirim callback ke GAS: ${error.message}`);
   }
 }
 
@@ -283,28 +29,174 @@ function estimateTokens(text) {
   return Math.ceil(text.length / 4);
 }
 
-// ==================== ERROR HANDLING ====================
+// ==========================================
+// FUNGSI 2: Eksekusi AI (Claude Utama -> Gemini Cadangan)
+// ==========================================
+async function callAIWithFallback(modelType, prompt) {
+  try {
+    // 🥇 OPSI UTAMA: CLAUDE
+    // Sonnet untuk bab analisa berat, Haiku untuk bab ringan/jadwal
+    const claudeModel = (modelType === 'sonnet') ? 'claude-3-5-sonnet-20241022' : 'claude-3-haiku-20240307';
+    console.log(`[API] Mencoba Claude Utama: ${claudeModel}...`);
+    
+    const claudeResponse = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: claudeModel,
+      max_tokens: 4000,
+      temperature: 0.3,
+      messages: [{ role: "user", content: prompt }]
+    }, {
+      headers: {
+        'x-api-key': process.env.CLAUDE_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      }
+    });
 
-app.use((err, req, res, next) => {
-  console.error('❌ Unhandled error:', err);
-  res.status(500).json({
-    error: err.message,
-    timestamp: new Date().toISOString()
+    if (claudeResponse.data && claudeResponse.data.content) {
+      return claudeResponse.data.content[0].text;
+    } else {
+      throw new Error("Respons Claude kosong");
+    }
+
+  } catch (claudeError) {
+    console.warn(`⚠️ [API Warning] Claude gagal (${claudeError.message}). Mengalihkan ke Gemini (Fallback)...`);
+    
+    // 🥈 OPSI CADANGAN: GEMINI 
+    try {
+      const geminiModel = (modelType === 'sonnet') ? 'gemini-1.5-pro' : 'gemini-1.5-flash';
+      console.log(`[API] Menggunakan Gemini Cadangan: ${geminiModel}...`);
+      
+      const geminiResponse = await ai.models.generateContent({
+        model: geminiModel,
+        contents: prompt,
+      });
+
+      // ⏱️ JEDA 5 DETIK: Penahan agar terhindar dari Error 429 Too Many Requests Google
+      await new Promise(resolve => setTimeout(resolve, 5000));
+
+      if (geminiResponse && geminiResponse.text) {
+        return geminiResponse.text;
+      } else {
+        throw new Error("Respons Gemini kosong");
+      }
+      
+    } catch (geminiError) {
+      console.error(`❌ [Fatal Error] Claude DAN Gemini sama-sama gagal!`);
+      throw new Error(`Sistem Failover Gagal. Error Akhir: ${geminiError.message}`);
+    }
+  }
+}
+
+// ==========================================
+// FUNGSI 3: Pembentuk Prompt 10 Bab (Array Murni)
+// ==========================================
+function buildAllPrompts(kak, details, kakExtraction) {
+  return [
+    `Buat Eksekutif Summary (Bab 0) berdasarkan poin utama KAK ini:\n${kak}`,
+    
+    `Generate Bab 1.1 Pemahaman Atas Pekerjaan untuk:\nPekerjaan: ${details?.namaPaket || 'Konsultasi'}\nInstansi: ${details?.instansi || 'Pemerintah'}\nKAK:\n${kak}`,
+    
+    `Generate Bab 1.2 Metodologi & Quality Control yang detail berdasarkan ekstraksi KAK berikut:\n${kakExtraction}`,
+    
+    `Generate Bab 2 Rencana Kerja (2-3 halaman). Buat langkah-langkah sistematis.`,
+    
+    `Generate Bab 3 Jadwal Pelaksanaan Pekerjaan (2 halaman). Sertakan tabel rincian tahapan.`,
+    
+    `Generate Bab 4 Komposisi Tim dan Penugasan (2 halaman). Jelaskan role masing-masing tenaga ahli.`,
+    
+    `Generate Bab 5 Jadwal Penugasan Personil (2 halaman). Buat dalam format narasi tabel waktu (mandays).`,
+    
+    `Generate Bab 6 Kepatuhan Perpres Pengadaan Barang/Jasa (2 halaman).`,
+    
+    `Generate Bab 7 Asumsi dan Mitigasi Risiko (2 halaman) untuk kelancaran proyek.`,
+    
+    `Generate Bab 8 Kriteria Sukses dan Penutup (2 halaman).`
+  ];
+}
+
+// ==========================================
+// ENDPOINT UTAMA: POST /api/generate
+// ==========================================
+app.post('/api/generate', async (req, res) => {
+  const { kak, details, callbackURL, jobID } = req.body;
+
+  if (!kak || !callbackURL || !jobID) {
+    return res.status(400).json({ error: 'Data tidak lengkap. Pastikan kak, callbackURL, dan jobID terisi.' });
+  }
+
+  // 1. LANGSUNG KIRIM STATUS 200 OK ke GAS agar tidak Timeout
+  res.status(200).json({
+    success: true,
+    jobID: jobID,
+    message: "Generation started in background via Claude/Gemini Fallback"
   });
+
+  console.log(`[${jobID}] Memulai tugas pembuatan dokumen...`);
+
+  // 2. PROSES LATAR BELAKANG DIMULAI
+  try {
+    // Ekstrak KAK terlebih dahulu
+    console.log(`[${jobID}] Mengekstrak struktur KAK...`);
+    const extractPrompt = `Ekstrak poin-poin paling krusial, tujuan, dan ruang lingkup dari KAK berikut:\n${kak}`;
+    const kakExtraction = await callAIWithFallback('haiku', extractPrompt); // Gunakan Haiku/Flash agar cepat
+
+    const prompts = buildAllPrompts(kak, details, kakExtraction);
+    const sections = [];
+    let progress = 10;
+
+    // Looping Eksekusi Bab 0 sampai 9
+    for (const [index, prompt] of prompts.entries()) {
+      // Bab 0, 1, 2, dan 8 butuh analisis mendalam (Gunakan Sonnet/Pro)
+      const modelType = [0, 1, 2, 8].includes(index) ? 'sonnet' : 'haiku';
+      
+      try {
+        console.log(`[${jobID}] Memproses Bab ${index}...`);
+        const content = await callAIWithFallback(modelType, prompt);
+        
+        sections.push({
+          sectionId: index,
+          content: content,
+          tokensUsed: estimateTokens(content)
+        });
+        
+        // Naikkan persentase & laporkan ke GAS
+        progress += 8;
+        console.log(`[${jobID}] Bab ${index} selesai.`);
+        await callGASCallback(callbackURL, {
+          jobID: jobID,
+          status: 'progress',
+          progress: progress,
+          message: `Bab ${index} berhasil diselesaikan.`
+        });
+
+      } catch (sectionError) {
+        console.error(`[${jobID}] Gagal di Bab ${index}:`, sectionError.message);
+        // Tetap lanjut ke bab berikutnya walaupun ada yang error (Graceful Degradation)
+      }
+    }
+
+    // 3. FINAL CALLBACK (Semua Bab Selesai, Kirim Hasil ke GAS)
+    console.log(`[${jobID}] Seluruh dokumen selesai! Mengirim data ke Google Drive...`);
+    await callGASCallback(callbackURL, {
+      jobID: jobID,
+      status: 'completed',
+      progress: 100,
+      result: { sections: sections }
+    });
+
+  } catch (globalError) {
+    console.error(`[${jobID}] Terjadi Kesalahan Fatal:`, globalError.message);
+    await callGASCallback(callbackURL, {
+      jobID: jobID,
+      status: 'error',
+      message: `Proses terhenti: ${globalError.message}`
+    });
+  }
 });
 
-// ==================== START SERVER ====================
-
+// ==========================================
+// START SERVER
+// ==========================================
 app.listen(PORT, () => {
-  console.log(`
-╔════════════════════════════════════════╗
-║      USTEKPRO Backend v2.5.0           ║
-║      Running on port ${PORT}             ║
-║      Node env: ${process.env.NODE_ENV}     ║
-║      Models: Gemini 1.5 Pro & 2.5 Flash║
-║      Status: ✅ Successfully Migrated  ║
-╚════════════════════════════════════════╝
-  `);
+  console.log(`🚀 Server UstekPro berjalan di Port ${PORT}`);
 });
-
-module.exports = app;
