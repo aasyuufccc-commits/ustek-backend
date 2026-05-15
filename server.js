@@ -12,14 +12,21 @@ const PORT = process.env.PORT || 8080;
 // ==========================================
 async function callGASCallback(url, payload) {
   try {
-    await axios.post(url, payload, {
+    console.log(`📤 [CALLBACK] Sending to: ${url}`);
+    console.log(`📦 [CALLBACK] Payload: ${JSON.stringify(payload, null, 2)}`);
+    
+    const response = await axios.post(url, payload, {
       headers: {
         'Content-Type': 'application/json'
-      }
+      },
+      timeout: 5000
     });
-    console.log(`✅ Callback berhasil dikirim untuk job ${payload.jobID}`);
+    
+    console.log(`✅ [CALLBACK] Status ${response.status}: Berhasil!`);
   } catch (error) {
-    console.error(`❌ Gagal mengirim callback ke GAS: ${error.message}`);
+    console.error(`❌ [CALLBACK] GAGAL ke ${url}`);
+    console.error(`❌ [CALLBACK] Status: ${error.response?.status}`);
+    console.error(`❌ [CALLBACK] Error: ${error.message}`);
   }
 }
 
