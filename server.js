@@ -1,11 +1,15 @@
 const express = require('express');
 const dotenv = require('dotenv');
 const axios = require('axios');
+const { GoogleGenAI } = require('@google/genai'); // ✅ Menggunakan SDK Resmi Google Gen AI
 
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 8080; // ✅ FIXED: Changed from 3000 to 8080
+const PORT = process.env.PORT || 8080;
+
+// Inisialisasi Google Gen AI menggunakan Environment Variable dari Railway
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // Middleware
 app.use(express.json());
@@ -20,13 +24,13 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    version: '2.0.2'
+    version: '2.5.0-gemini'
   });
 });
 
 /**
  * Main: Generate Document
- * Receives job from GAS, orchestrates Claude API calls
+ * Receives job from GAS, orchestrates Gemini API calls
  */
 app.post('/api/generate', async (req, res) => {
   try {
@@ -57,9 +61,9 @@ app.post('/api/generate', async (req, res) => {
       callbackSecret
     });
 
-    // STEP 1: Extract KAK menggunakan Claude
-    console.log(`[${jobID}] Extracting KAK structure...`);
-    const kakExtraction = await callClaudeAPI('haiku', buildPromptExtractKAK(kak), 4000);
+    // STEP 1: Extract KAK menggunakan Gemini 2.5 Flash (Cepat & Akurat)
+    console.log(`[${jobID}] Extracting KAK structure via Gemini...`);
+    const kakExtraction = await callGeminiAPI('haiku', buildPromptExtractKAK(kak));
     
     await callGASCallback(callbackURL, {
       jobID,
@@ -77,11 +81,13 @@ app.post('/api/generate', async (req, res) => {
     
     let progress = 20;
     for (const [index, prompt] of prompts.entries()) {
-      const model = [0, 1, 2, 8].includes(index) ? 'sonnet' : 'haiku';
-      const maxTokens = [0, 1, 2, 8].includes(index) ? 16000 : 4096;
+      // Pemetaan Model Sesuai Project Brief UstekPro:
+      // Indeks [0, 1, 2, 8] membutuhkan akurasi tinggi (Sonnet) -> Diarahkan ke gemini-1.5-pro
+      // Indeks lainnya bersifat faktual/standard (Haiku) -> Diarahkan ke gemini-2.5-flash
+      const modelType = [0, 1, 2, 8].includes(index) ? 'sonnet' : 'haiku';
       
       try {
-        const response = await callClaudeAPI(model, prompt, maxTokens);
+        const response = await callGeminiAPI(modelType, prompt);
         sections.push({
           sectionId: index,
           content: response,
@@ -89,7 +95,7 @@ app.post('/api/generate', async (req, res) => {
         });
         
         progress += 7;
-        console.log(`[${jobID}] Section ${index} done (${model})`);
+        console.log(`[${jobID}] Section ${index} done (${modelType === 'sonnet' ? 'gemini-1.5-pro' : 'gemini-2.5-flash'})`);
         
         await callGASCallback(callbackURL, {
           jobID,
@@ -118,7 +124,7 @@ app.post('/api/generate', async (req, res) => {
       success: true,
       jobID,
       sectionsGenerated: sections.length,
-      message: 'Generation completed'
+      message: 'Generation completed via Google Gemini API'
     });
 
   } catch (error) {
@@ -159,70 +165,29 @@ app.get('/api/status/:jobID', (req, res) => {
   });
 });
 
-/**
- * List Available Models (Proxy to Claude API)
- * FIX for 404 error - Railway now proxies /v1/models to Claude API
- */
-app.get('/v1/models', async (req, res) => {
+// ==================== GOOGLE GEMINI API CALLS ====================
+
+async function callGeminiAPI(modelType, prompt) {
   try {
-    const response = await axios.get(
-      'https://api.anthropic.com/v1/models',
-      {
-        headers: {
-          'x-api-key': process.env.CLAUDE_API_KEY,
-          'anthropic-version': '2023-06-01'
-        }
-      }
-    );
-    res.json(response.data);
-  } catch (error) {
-    console.error('❌ Models endpoint error:', error.response?.data || error.message);
-    res.status(error.response?.status || 500).json({
-      error: error.message
+    // Alokasi model berdasarkan bobot dokumen
+    const modelString = (modelType === 'sonnet') ? 'gemini-1.5-pro' : 'gemini-2.5-flash';
+    
+    console.log(`[API] Calling Google Gen AI: ${modelString}`);
+    
+    const response = await ai.models.generateContent({
+      model: modelString,
+      contents: prompt,
     });
-  }
-});
 
-// ==================== CLAUDE API CALLS ====================
-
-async function callClaudeAPI(model, prompt, maxTokens) {
-  try {
-    // ✅ FIXED: Valid model names from Anthropic docs (May 15, 2026)
-    const MODEL_MAP = {
-      'sonnet': 'claude-sonnet-4-20250514',
-      'haiku': 'claude-3-5-haiku-20241022'
-    };
-
-    const modelString = MODEL_MAP[model] || 'claude-3-5-haiku-20241022';
-    
-    console.log(`[API] Calling ${modelString} with ${maxTokens} max_tokens`);
-    
-    const response = await axios.post(
-      'https://api.anthropic.com/v1/messages',
-      {
-        model: modelString,
-        max_tokens: maxTokens,
-        messages: [
-          {
-            role: 'user',
-            content: prompt
-          }
-        ]
-      },
-      {
-        headers: {
-          'x-api-key': process.env.CLAUDE_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json'
-        }
-      }
-    );
-
-    return response.data.content[0]?.text || '';
+    if (response && response.text) {
+      return response.text;
+    } else {
+      throw new Error("Empty response from Gemini API");
+    }
 
   } catch (error) {
-    console.error('❌ Claude API error:', error.response?.data || error.message);
-    throw new Error(`Claude API failed: ${error.message}`);
+    console.error('❌ Gemini API error:', error.message);
+    throw new Error(`Gemini API failed: ${error.message}`);
   }
 }
 
@@ -319,11 +284,11 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
-║     USTEKPRO Backend v2.0.2            ║
-║     Running on port ${PORT}              ║
-║     Node env: ${process.env.NODE_ENV}     ║
-║     Models: claude-opus-4-1             ║
-║     Status: ✅ All fixes applied        ║
+║      USTEKPRO Backend v2.5.0           ║
+║      Running on port ${PORT}             ║
+║      Node env: ${process.env.NODE_ENV}     ║
+║      Models: Gemini 1.5 Pro & 2.5 Flash║
+║      Status: ✅ Successfully Migrated  ║
 ╚════════════════════════════════════════╝
   `);
 });
