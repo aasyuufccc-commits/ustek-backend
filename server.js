@@ -169,8 +169,9 @@ app.get('/api/status/:jobID', (req, res) => {
 
 async function callGeminiAPI(modelType, prompt) {
   try {
-    // Alokasi model berdasarkan bobot dokumen
-    const modelString = (modelType === 'sonnet') ? 'gemini-1.5-pro-latest' : 'gemini-2.5-flash';
+    // ✅ PENAMAAN RESMI & VALID UNTUK SDK @google/genai
+    // 'gemini-1.5-pro' adalah string global yang otomatis mengarah ke versi Pro paling stabil
+    const modelString = (modelType === 'sonnet') ? 'gemini-1.5-pro' : 'gemini-2.5-flash';
     
     console.log(`[API] Calling Google Gen AI: ${modelString}`);
     
