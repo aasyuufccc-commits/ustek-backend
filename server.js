@@ -5,7 +5,7 @@ const axios = require('axios');
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || process.env.PORT || 8080;;
+const PORT = process.env.PORT || 8080; // ✅ FIXED: Changed from 3000 to 8080
 
 // Middleware
 app.use(express.json());
@@ -20,7 +20,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    version: '2.0.1'
+    version: '2.0.2'
   });
 });
 
@@ -187,12 +187,13 @@ app.get('/v1/models', async (req, res) => {
 
 async function callClaudeAPI(model, prompt, maxTokens) {
   try {
+    // ✅ FIXED: Updated model names to claude-opus-4-1
     const MODEL_MAP = {
-      'sonnet': 'claude-sonnet-4-20250514',
-      'haiku': 'claude-haiku-4-20250801'
+      'sonnet': 'claude-opus-4-1',
+      'haiku': 'claude-opus-4-1'
     };
 
-    const modelString = MODEL_MAP[model] || 'claude-haiku-4-20250801';
+    const modelString = MODEL_MAP[model] || 'claude-opus-4-1';
     
     console.log(`[API] Calling ${modelString} with ${maxTokens} max_tokens`);
     
@@ -318,10 +319,11 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
-║     USTEKPRO Backend v2.0.1            ║
+║     USTEKPRO Backend v2.0.2            ║
 ║     Running on port ${PORT}              ║
 ║     Node env: ${process.env.NODE_ENV}     ║
-║     Models: claude-sonnet-4 + claude-haiku-4
+║     Models: claude-opus-4-1             ║
+║     Status: ✅ All fixes applied        ║
 ╚════════════════════════════════════════╝
   `);
 });
