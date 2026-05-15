@@ -14,7 +14,6 @@ async function callGASCallback(url, payload) {
   try {
     await axios.post(url, payload, {
       headers: {
-        'x-api-key': process.env.GAS_CALLBACK_SECRET || 'PPKPRO_WEBHOOK_SECRET_2026',
         'Content-Type': 'application/json'
       }
     });
