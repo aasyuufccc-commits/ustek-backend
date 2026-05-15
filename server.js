@@ -20,7 +20,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    version: '2.0.0'
+    version: '2.0.1'
   });
 });
 
@@ -164,11 +164,11 @@ app.get('/api/status/:jobID', (req, res) => {
 async function callClaudeAPI(model, prompt, maxTokens) {
   try {
     const MODEL_MAP = {
-      'sonnet': 'claude-3-5-sonnet-20241022',
-      'haiku': 'claude-3-5-haiku-20241022'
+      'sonnet': 'claude-sonnet-4-20250514',
+      'haiku': 'claude-haiku-4-20250801'
     };
 
-    const modelString = MODEL_MAP[model] || 'claude-3-5-haiku-20241022';
+    const modelString = MODEL_MAP[model] || 'claude-haiku-4-20250801';
     
     console.log(`[API] Calling ${modelString} with ${maxTokens} max_tokens`);
     
@@ -294,9 +294,10 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
-║     USTEKPRO Backend v2.0.0            ║
+║     USTEKPRO Backend v2.0.1            ║
 ║     Running on port ${PORT}              ║
 ║     Node env: ${process.env.NODE_ENV}     ║
+║     Models: claude-sonnet-4 + claude-haiku-4
 ╚════════════════════════════════════════╝
   `);
 });
