@@ -169,9 +169,8 @@ app.get('/api/status/:jobID', (req, res) => {
 
 async function callGeminiAPI(modelType, prompt) {
   try {
-    // ✅ PENAMAAN RESMI & VALID UNTUK SDK @google/genai
-    // 'gemini-1.5-pro' adalah string global yang otomatis mengarah ke versi Pro paling stabil
-    const modelString = (modelType === 'sonnet') ? 'gemini-1.5-pro' : 'gemini-2.5-flash';
+    // ✅ Menggunakan gemini-2.5-pro sebagai model utama karena jalurnya jauh lebih sepi & responsif di tahun 2026
+    const modelString = (modelType === 'sonnet') ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
     
     console.log(`[API] Calling Google Gen AI: ${modelString}`);
     
@@ -187,6 +186,20 @@ async function callGeminiAPI(modelType, prompt) {
     }
 
   } catch (error) {
+    // 🔄 MEKANISME RETRY: Jika gemini-2.5-pro sibuk (503), otomatis lempar fallback ke gemini-1.5-pro
+    if (error.message.includes('503') && modelType === 'sonnet') {
+      console.warn(`⚠️ [API Warning] gemini-2.5-pro sibuk, mencoba fallback ke gemini-1.5-pro...`);
+      try {
+        const fallbackResponse = await ai.models.generateContent({
+          model: 'gemini-1.5-pro',
+          contents: prompt,
+        });
+        return fallbackResponse.text;
+      } catch (fallbackError) {
+        throw new Error(`Gemini API Primary & Fallback failed: ${fallbackError.message}`);
+      }
+    }
+    
     console.error('❌ Gemini API error:', error.message);
     throw new Error(`Gemini API failed: ${error.message}`);
   }
