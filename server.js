@@ -159,6 +159,30 @@ app.get('/api/status/:jobID', (req, res) => {
   });
 });
 
+/**
+ * List Available Models (Proxy to Claude API)
+ * FIX for 404 error - Railway now proxies /v1/models to Claude API
+ */
+app.get('/v1/models', async (req, res) => {
+  try {
+    const response = await axios.get(
+      'https://api.anthropic.com/v1/models',
+      {
+        headers: {
+          'x-api-key': process.env.CLAUDE_API_KEY,
+          'anthropic-version': '2023-06-01'
+        }
+      }
+    );
+    res.json(response.data);
+  } catch (error) {
+    console.error('❌ Models endpoint error:', error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({
+      error: error.message
+    });
+  }
+});
+
 // ==================== CLAUDE API CALLS ====================
 
 async function callClaudeAPI(model, prompt, maxTokens) {
