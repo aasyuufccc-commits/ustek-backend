@@ -155,7 +155,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    version: '2.2.0',
+    version: '2.2.1',
     ai_primary: 'Claude',
     ai_fallback: 'Gemini',
     gas_callback: GAS_CALLBACK_URL ? 'configured' : 'NOT configured'
@@ -181,7 +181,7 @@ app.get('/api/status/:jobID', (req, res) => {
 // ENDPOINT UTAMA: POST /api/generate
 // ==========================================
 app.post('/api/generate', async (req, res) => {
-  const { jobID, kak, details, callbackURL } = req.body;
+  const { jobID, kak, details, callbackURL, driveFolderID } = req.body;
 
   if (!jobID || !kak || !callbackURL) {
     return res.status(400).json({ 
@@ -197,13 +197,15 @@ app.post('/api/generate', async (req, res) => {
   });
 
   console.log(`\n[${jobID}] 🚀 Memulai tugas pembuatan dokumen...`);
+  console.log(`[${jobID}] 📁 Drive Folder ID: ${driveFolderID || 'ROOT'}`);
 
   // Initialize status
   jobStatus[jobID] = {
     jobID: jobID,
     status: 'processing',
     progress: 0,
-    bahs: []
+    bahs: [],
+    driveFolderID: driveFolderID || 'root'
   };
 
   // 2. PROSES LATAR BELAKANG (Tidak menunggu response)
@@ -249,7 +251,7 @@ app.post('/api/generate', async (req, res) => {
           );
           const docxBase64 = docxBuffer.toString('base64');
 
-          // Kirim ke GAS
+          // 🔑 PENTING: PASS driveFolderID KE CALLBACK!
           await callGASCallback(callbackURL, {
             jobID: jobID,
             status: 'progress',
@@ -257,7 +259,8 @@ app.post('/api/generate', async (req, res) => {
             message: `Bab ${index} berhasil di-generate`,
             babNum: index,
             babNama: `Bab ${index}`,
-            docxBase64: docxBase64
+            docxBase64: docxBase64,
+            folderID: driveFolderID || ''  // ← KUNCI FIX!
           });
 
           jobStatus[jobID].bahs.push({
@@ -336,11 +339,12 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
-║     USTEKPRO Backend v2.2.0            ║
+║     USTEKPRO Backend v2.2.1            ║
 ║     Running on port ${PORT}              ║
 ║     AI: Claude (Primary)              ║
 ║     Fallback: Gemini                   ║
 ║     DOCX Builder: Enabled              ║
+║     Folder Management: ✅ ENABLED      ║
 ║     Status: ✅ Ready                   ║
 ╚════════════════════════════════════════╝
   `);
