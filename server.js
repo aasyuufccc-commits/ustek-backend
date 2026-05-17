@@ -45,8 +45,8 @@ async function callAIWithFallback(modelType, prompt) {
   try {
     // 🥇 OPSI UTAMA: CLAUDE
     const claudeModel = (modelType === 'sonnet') 
-      ? 'claude-sonnet-4-20250514' 
-      : 'claude-3-5-haiku-20241022';
+      ? 'claude-sonnet-4-6' 
+      : 'claude-haiku-4-5';
     
     console.log(`[API] Mencoba Claude Utama: ${claudeModel}...`);
     
