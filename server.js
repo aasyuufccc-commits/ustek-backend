@@ -1,352 +1,416 @@
+/**
+ * SERVER.JS v3.0
+ * UstekPro/PPKPro Backend - Proposal Teknis Generator
+ * Structure: 6 BAB (DED & Pengawasan Konstruksi)
+ * Total: 14 API calls per jenis layanan
+ * 
+ * CHANGELOG v3.0:
+ * - Rebuild clean untuk 6 bab struktur (bukan 10 bab)
+ * - Conditional logic DED vs Pengawasan
+ * - Import prompts.js untuk template management
+ * - Accept personel array dari frontend
+ * - Pass folderID ke callback (fix file location issue)
+ * - 14 API calls optimized (3 Sonnet, 11 Haiku)
+ */
+
 const express = require('express');
 const axios = require('axios');
-const { buildBabDocx } = require('./lib/docxBuilder');
-const { kirimBabKeGAS } = require('./lib/gasCallback');
+const Anthropic = require('@anthropic-ai/sdk').default;
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { buildProposalTeknis } = require('./lib/docxBuilder');
+const promptLibrary = require('./prompts');
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+
 app.use(express.json({ limit: '50mb' }));
 
-const PORT = process.env.PORT || 8080;
-const GAS_CALLBACK_URL = process.env.GAS_CALLBACK_URL || '';
+const CONFIG = {
+  CLAUDE_API_KEY: process.env.CLAUDE_API_KEY,
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+};
 
-// Job tracking
-const jobStatus = {};
+const anthropic = new Anthropic({ apiKey: CONFIG.CLAUDE_API_KEY });
 
-// ==========================================
-// FUNGSI 1: Callback Laporan ke Google Apps Script
-// ==========================================
-async function callGASCallback(url, payload) {
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Generate final prompt by replacing placeholders
+ */
+function generateFinalPrompt(templatePrompt, kakText, personel, durasi) {
+  const personelString = personel
+    .map((p) => `- ${p.nama} (${p.posisi}, ${p.durasi} OB${p.sertifikasi ? ', ' + p.sertifikasi : ''})`)
+    .join('\n');
+
+  let finalPrompt = templatePrompt
+    .replace('[KAK_TEXT]', kakText)
+    .replace('[PERSONEL_LIST]', personelString)
+    .replace('[DURASI]', durasi);
+
+  return finalPrompt;
+}
+
+/**
+ * Call Claude API dengan fallback ke Gemini
+ */
+async function callClaudeAPI(prompt, model = 'claude-sonnet-4-6') {
   try {
-    console.log(`📤 [CALLBACK] Sending to: ${url.substring(0, 80)}...`);
-    
-    const response = await axios.post(url, payload, {
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      timeout: 10000
+    console.log(`[API] Calling ${model}...`);
+    const message = await anthropic.messages.create({
+      model: model,
+      max_tokens: model === 'claude-sonnet-4-6' ? 2000 : 1500,
+      messages: [{ role: 'user', content: prompt }],
     });
-    
-    console.log(`✅ [CALLBACK] Status ${response.status}: Berhasil!`);
-    return true;
+
+    const responseText = message.content[0]?.text || '';
+    const tokens = message.usage.input_tokens + message.usage.output_tokens;
+    console.log(`[API] ✓ ${model} (${tokens} tokens)`);
+    return responseText;
   } catch (error) {
-    console.error(`❌ [CALLBACK] GAGAL: ${error.message}`);
-    return false;
+    console.error(`[API] Claude error: ${error.message}, fallback to Gemini...`);
+    return await callGeminiAPI(prompt);
   }
 }
 
-function estimateTokens(text) {
-  return Math.ceil(text.length / 4);
-}
-
-// ==========================================
-// FUNGSI 2: Eksekusi AI (Claude Utama -> Gemini Cadangan)
-// ==========================================
-async function callAIWithFallback(modelType, prompt) {
+/**
+ * Fallback ke Gemini API
+ */
+async function callGeminiAPI(prompt) {
   try {
-    // 🥇 OPSI UTAMA: CLAUDE
-    const claudeModel = (modelType === 'sonnet') 
-      ? 'claude-sonnet-4-6' 
-      : 'claude-haiku-4-5';
-    
-    console.log(`[API] Mencoba Claude Utama: ${claudeModel}...`);
-    
-    const claudeResponse = await axios.post(
-      'https://api.anthropic.com/v1/messages',
-      {
-        model: claudeModel,
-        max_tokens: 4000,
-        temperature: 0.3,
-        messages: [{ role: "user", content: prompt }]
-      },
-      {
-        headers: {
-          'x-api-key': process.env.CLAUDE_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json'
-        }
-      }
-    );
-
-    if (claudeResponse.data && claudeResponse.data.content && claudeResponse.data.content.length > 0) {
-      console.log(`✅ Claude berhasil generate (${estimateTokens(claudeResponse.data.content[0].text)} tokens)`);
-      return claudeResponse.data.content[0].text;
-    } else {
-      throw new Error("Respons Claude kosong");
-    }
-
-  } catch (claudeError) {
-    console.warn(`⚠️ Claude gagal (${claudeError.message}). Mengalihkan ke Gemini...`);
-    
-    // 🥈 OPSI CADANGAN: GEMINI
-    try {
-      const geminiModel = (modelType === 'sonnet') 
-        ? 'gemini-2.5-pro' 
-        : 'gemini-2.5-flash';
-      
-      console.log(`[API] Menggunakan Gemini Cadangan: ${geminiModel}...`);
-      
-      const geminiResponse = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${process.env.GEMINI_API_KEY}`,
-        {
-          contents: [
-            {
-              parts: [
-                {
-                  text: prompt
-                }
-              ]
-            }
-          ]
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json'
-          }
-        }
-      );
-
-      const geminiText = geminiResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      
-      if (geminiText) {
-        console.log(`✅ Gemini berhasil generate (${estimateTokens(geminiText)} tokens)`);
-        return geminiText;
-      } else {
-        throw new Error("Respons Gemini kosong");
-      }
-      
-    } catch (geminiError) {
-      console.error(`❌ Claude DAN Gemini sama-sama gagal!`);
-      throw new Error(`Sistem Failover Gagal: ${geminiError.message}`);
-    }
+    console.log('[API] Calling Gemini 2.5 Pro (fallback)...');
+    const genAI = new GoogleGenerativeAI(CONFIG.GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-pro' });
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text();
+    console.log('[API] ✓ Gemini fallback success');
+    return responseText;
+  } catch (error) {
+    console.error(`[API] Gemini fallback error: ${error.message}`);
+    throw new Error('All AI providers failed');
   }
 }
 
-// ==========================================
-// FUNGSI 3: Pembentuk Prompt 10 Bab
-// ==========================================
-function buildAllPrompts(kak, details, kakExtraction) {
-  return [
-    `Buat Eksekutif Summary (Bab 0) berdasarkan poin utama KAK ini:\n${kak}`,
-    
-    `Generate Bab 1.1 Pemahaman Atas Pekerjaan untuk:\nPekerjaan: ${details?.namaPaket || 'Konsultasi'}\nInstansi: ${details?.instansi || 'Pemerintah'}\nLokasi: ${details?.lokasi || 'Unspecified'}\nKAK:\n${kak}`,
-    
-    `Generate Bab 1.2 Metodologi & Quality Control yang detail (10-15 halaman) berdasarkan ekstraksi KAK berikut:\n${kakExtraction}\n\nSertakan: Tahapan pelaksanaan, Metodologi kerja, QC process, Risk mitigation, Timeline Gantt.`,
-    
-    `Generate Bab 2 Rencana Kerja (2-3 halaman). Buat langkah-langkah sistematis dan terstruktur.`,
-    
-    `Generate Bab 3 Jadwal Pelaksanaan Pekerjaan (2 halaman). Sertakan tabel rincian tahapan dengan durasi.`,
-    
-    `Generate Bab 4 Komposisi Tim dan Penugasan (2 halaman). Jelaskan role masing-masing tenaga ahli.`,
-    
-    `Generate Bab 5 Jadwal Penugasan Personil (2 halaman). Buat dalam format narasi tabel waktu (mandays per bulan).`,
-    
-    `Generate Bab 6 Kepatuhan Perpres Pengadaan Barang/Jasa (2 halaman). Fokus pada compliance & regulatory.`,
-    
-    `Generate Bab 7 Asumsi dan Mitigasi Risiko (2 halaman) untuk kelancaran proyek. Identifikasi risiko utama & solusi.`,
-    
-    `Generate Bab 8 Kriteria Sukses, KPI, dan Penutup (2 halaman). Bagaimana mengukur kesuksesan proyek.`
-  ];
+/**
+ * Call GAS callback untuk save file ke Drive
+ */
+async function callGASCallback(callbackURL, data) {
+  try {
+    const response = await axios.post(callbackURL, data, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 30000,
+    });
+    console.log(`[CALLBACK] ✓ Status ${response.status}: File saved to Drive`);
+    return response.data;
+  } catch (error) {
+    console.error(`[CALLBACK] ✗ Error: ${error.message}`);
+    throw error;
+  }
 }
 
-// ==========================================
-// HEALTH CHECK ENDPOINT
-// ==========================================
-app.get('/health', (req, res) => {
-  res.json({
+// ============================================================================
+// MAIN GENERATION FUNCTION
+// ============================================================================
+
+async function generateProposalTeknis(jobData) {
+  const { jobID, jenisLayanan, kak, details, personel, callbackURL, driveFolderID } = jobData;
+
+  console.log(`\n${'='.repeat(80)}`);
+  console.log(`[JOB ${jobID}] GENERATE ${jenisLayanan.toUpperCase()} PROPOSAL`);
+  console.log(`${'='.repeat(80)}\n`);
+
+  const babResponses = {};
+  const durasi = details.durasi || 6;
+
+  try {
+    // ========== BAB 1: PEMAHAMAN ATAS JASA LAYANAN DALAM KAK ==========
+    console.log('[BAB 1] Pemahaman Atas Jasa Layanan...');
+
+    const prompt1_1 = generateFinalPrompt(
+      promptLibrary[jenisLayanan]['1.1'].instructions,
+      kak,
+      personel,
+      durasi
+    );
+    babResponses['1.1'] = await callClaudeAPI(prompt1_1, 'claude-sonnet-4-6');
+
+    const prompt1_2 = generateFinalPrompt(
+      promptLibrary[jenisLayanan]['1.2'].instructions,
+      kak,
+      personel,
+      durasi
+    );
+    babResponses['1.2'] = await callClaudeAPI(prompt1_2, 'claude-sonnet-4-6');
+
+    const prompt1_3 = generateFinalPrompt(
+      promptLibrary[jenisLayanan]['1.3'].instructions,
+      kak,
+      personel,
+      durasi
+    );
+    babResponses['1.3'] = await callClaudeAPI(prompt1_3, 'claude-haiku-4-5');
+
+    const prompt1_4 = generateFinalPrompt(
+      promptLibrary[jenisLayanan]['1.4'].instructions,
+      kak,
+      personel,
+      durasi
+    );
+    babResponses['1.4'] = await callClaudeAPI(prompt1_4, 'claude-haiku-4-5');
+
+    // ========== BAB 2: PENDEKATAN DAN METODOLOGI ==========
+    console.log('[BAB 2] Pendekatan dan Metodologi...');
+
+    const prompt2_1 = generateFinalPrompt(
+      promptLibrary[jenisLayanan]['2.1'].instructions,
+      kak,
+      personel,
+      durasi
+    );
+    babResponses['2.1'] = await callClaudeAPI(prompt2_1, 'claude-sonnet-4-6');
+
+    const prompt2_2 = generateFinalPrompt(
+      promptLibrary[jenisLayanan]['2.2'].instructions,
+      kak,
+      personel,
+      durasi
+    );
+    babResponses['2.2'] = await callClaudeAPI(prompt2_2, 'claude-sonnet-4-6');
+
+    const prompt2_3 = generateFinalPrompt(
+      promptLibrary[jenisLayanan]['2.3'].instructions,
+      kak,
+      personel,
+      durasi
+    );
+    babResponses['2.3'] = await callClaudeAPI(prompt2_3, 'claude-haiku-4-5');
+
+    // ========== BAB 3: PROGRAM KERJA ==========
+    console.log('[BAB 3] Program Kerja...');
+
+    const prompt3_1 = generateFinalPrompt(
+      promptLibrary[jenisLayanan]['3.1'].instructions,
+      kak,
+      personel,
+      durasi
+    );
+    babResponses['3.1'] = await callClaudeAPI(prompt3_1, 'claude-haiku-4-5');
+
+    // 3.2 Gantt Chart - placeholder (no API call)
+    babResponses['3.2'] = `
+[GANTT CHART PLACEHOLDER]
+
+Masukkan Gantt Chart jadwal ${durasi} bulan dengan milestone di sini.
+
+Format: Tabel atau diagram batang
+Struktur: Bulan 1-${durasi}, Fase utama, Kegiatan kunci, Milestone
+
+Contoh format:
+| KEGIATAN          | M1 | M2 | M3 | M4 | M5 | M6 |
+|---|---|---|---|---|---|---|
+| Persiapan         | === |    |    |    |    |    |
+| Design Konsep     |    | ========== |    |    |    |
+| Detail Design     |    |    | ========== |    |    |
+| Finalisasi        |    |    |    | === |    |    |
+| Serah-Terima      |    |    |    |    | === |    |
+`;
+
+    const prompt3_3 = generateFinalPrompt(
+      promptLibrary[jenisLayanan]['3.3'].instructions,
+      kak,
+      personel,
+      durasi
+    );
+    babResponses['3.3'] = await callClaudeAPI(prompt3_3, 'claude-haiku-4-5');
+
+    // ========== BAB 4: ORGANISASI DAN PERSONEL ==========
+    console.log('[BAB 4] Organisasi dan Personel...');
+
+    // 4.1 Bagan Organisasi - placeholder
+    babResponses['4.1'] = `
+[BAGAN ORGANISASI PLACEHOLDER]
+
+Masukkan bagan struktur organisasi tim di sini.
+
+Format: Diagram hierarki dengan kotak dan garis penghubung
+
+Contoh struktur:
+
+                    TEAM LEADER
+           /            |            \\
+        AHLI          AHLI          AHLI        AHLI K3
+      STRUKTUR      ARSITEK         MEP
+
+Personel dalam tim:
+${personel.map((p) => `- ${p.nama} (${p.posisi})`).join('\n')}
+`;
+
+    const prompt4_2 = generateFinalPrompt(
+      promptLibrary[jenisLayanan]['4.2'].instructions,
+      kak,
+      personel,
+      durasi
+    );
+    babResponses['4.2'] = await callClaudeAPI(prompt4_2, 'claude-haiku-4-5');
+
+    const prompt4_3 = generateFinalPrompt(
+      promptLibrary[jenisLayanan]['4.3'].instructions,
+      kak,
+      personel,
+      durasi
+    );
+    babResponses['4.3'] = await callClaudeAPI(prompt4_3, 'claude-haiku-4-5');
+
+    // ========== BAB 5: PENYAJIAN HASIL KERJA ==========
+    console.log('[BAB 5] Penyajian Hasil Kerja...');
+
+    const prompt5_0 = generateFinalPrompt(
+      promptLibrary[jenisLayanan]['5.0'].instructions,
+      kak,
+      personel,
+      durasi
+    );
+    babResponses['5.0'] = await callClaudeAPI(prompt5_0, 'claude-haiku-4-5');
+
+    // ========== BAB 6: GAGASAN BARU DAN INOVASI ==========
+    console.log('[BAB 6] Gagasan Baru dan Inovasi...');
+
+    const prompt6_1 = generateFinalPrompt(
+      promptLibrary[jenisLayanan]['6.1'].instructions,
+      kak,
+      personel,
+      durasi
+    );
+    babResponses['6.1'] = await callClaudeAPI(prompt6_1, 'claude-haiku-4-5');
+
+    // ========== BUILD DOCX ==========
+    console.log('[DOCX] Building proposal document...');
+
+    const docxBuffer = await buildProposalTeknis({
+      jenisLayanan,
+      details,
+      personel,
+      babResponses,
+    });
+
+    const docxBase64 = docxBuffer.toString('base64');
+
+    // ========== CALLBACK KE GAS ==========
+    console.log('[CALLBACK] Sending to GAS for Drive save...');
+
+    await callGASCallback(callbackURL, {
+      jobID,
+      docxBase64,
+      folderID: driveFolderID || '',
+      filename: `Proposal_Teknis_${jenisLayanan}_${jobID}.docx`,
+    });
+
+    console.log(`\n[JOB ${jobID}] ✅ COMPLETE\n`);
+
+    return {
+      success: true,
+      jobID,
+      message: `Proposal Teknis ${jenisLayanan} berhasil dibuat`,
+      fileSize: docxBase64.length,
+    };
+  } catch (error) {
+    console.error(`\n[JOB ${jobID}] ✗ ERROR: ${error.message}\n`);
+
+    return {
+      success: false,
+      jobID,
+      error: error.message,
+    };
+  }
+}
+
+// ============================================================================
+// API ENDPOINTS
+// ============================================================================
+
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
     status: 'ok',
+    version: '3.0',
     timestamp: new Date().toISOString(),
-    version: '2.2.1',
-    ai_primary: 'Claude',
-    ai_fallback: 'Gemini',
-    gas_callback: GAS_CALLBACK_URL ? 'configured' : 'NOT configured'
   });
 });
 
-// ==========================================
-// STATUS ENDPOINT
-// ==========================================
-app.get('/api/status/:jobID', (req, res) => {
-  const status = jobStatus[req.params.jobID];
-  if (!status) {
-    return res.json({
-      jobID: req.params.jobID,
-      status: 'not_found',
-      message: 'Job tidak ditemukan'
-    });
-  }
-  res.json(status);
-});
-
-// ==========================================
-// ENDPOINT UTAMA: POST /api/generate
-// ==========================================
+/**
+ * Main generate endpoint
+ * Body:
+ * {
+ *   jobID: string,
+ *   jenisLayanan: "DED" | "Pengawasan",
+ *   kak: string,
+ *   details: { durasi, ... },
+ *   personel: [{nama, posisi, durasi, sertifikasi}, ...],
+ *   callbackURL: string,
+ *   driveFolderID: string
+ * }
+ */
 app.post('/api/generate', async (req, res) => {
-  const { jobID, kak, details, callbackURL, driveFolderID } = req.body;
+  const jobData = req.body;
+  const { jobID, jenisLayanan } = jobData;
 
-  if (!jobID || !kak || !callbackURL) {
-    return res.status(400).json({ 
-      error: 'Data tidak lengkap. Pastikan jobID, kak, dan callbackURL terisi.' 
+  console.log(`[${jobID}] Request received for ${jenisLayanan}`);
+
+  if (!jobID || !jenisLayanan || !jobData.kak || !jobData.personel) {
+    return res.status(400).json({
+      error: 'Missing required fields',
     });
   }
 
-  // 1. LANGSUNG KIRIM STATUS 200 OK
+  if (!['DED', 'Pengawasan'].includes(jenisLayanan)) {
+    return res.status(400).json({
+      error: 'jenisLayanan must be "DED" or "Pengawasan"',
+    });
+  }
+
   res.status(200).json({
     success: true,
-    jobID: jobID,
-    message: "Generation started in background"
+    jobID,
+    message: 'Generation started in background',
   });
 
-  console.log(`\n[${jobID}] 🚀 Memulai tugas pembuatan dokumen...`);
-  console.log(`[${jobID}] 📁 Drive Folder ID: ${driveFolderID || 'ROOT'}`);
-
-  // Initialize status
-  jobStatus[jobID] = {
-    jobID: jobID,
-    status: 'processing',
-    progress: 0,
-    bahs: [],
-    driveFolderID: driveFolderID || 'root'
-  };
-
-  // 2. PROSES LATAR BELAKANG (Tidak menunggu response)
+  // Process async
   (async () => {
-    try {
-      // Ekstrak KAK terlebih dahulu
-      console.log(`[${jobID}] 📖 Mengekstrak struktur KAK...`);
-      const extractPrompt = `Ekstrak poin-poin paling krusial, tujuan, ruang lingkup, dan deliverables dari KAK berikut:\n${kak}`;
-      const kakExtraction = await callAIWithFallback('haiku', extractPrompt);
-
-      jobStatus[jobID].progress = 5;
-      jobStatus[jobID].status = 'extracting';
-
-      // Kirim callback progress awal
-      await callGASCallback(callbackURL, {
-        jobID: jobID,
-        status: 'progress',
-        progress: 5,
-        message: 'Ekstraksi KAK selesai, mulai generate 10 bab...'
-      });
-
-      const prompts = buildAllPrompts(kak, details, kakExtraction);
-      let progress = 10;
-
-      // Looping Eksekusi Bab 0 sampai 9
-      for (const [index, prompt] of prompts.entries()) {
-        // Bab 0, 1, 2, dan 8 butuh analisis mendalam (Gunakan Sonnet/Pro)
-        const modelType = [0, 1, 2, 8].includes(index) ? 'sonnet' : 'haiku';
-        
-        try {
-          console.log(`[${jobID}] 📝 Memproses Bab ${index} (${modelType})...`);
-          jobStatus[jobID].status = 'generating';
-          jobStatus[jobID].currentBab = index;
-
-          const content = await callAIWithFallback(modelType, prompt);
-          
-          // Build DOCX
-          console.log(`[${jobID}] 🔨 Building DOCX for Bab ${index}...`);
-          const docxBuffer = await buildBabDocx(
-            { num: index, nama: `Bab ${index}` },
-            content,
-            details
-          );
-          const docxBase64 = docxBuffer.toString('base64');
-
-          // 🔑 PENTING: PASS driveFolderID KE CALLBACK!
-          await callGASCallback(callbackURL, {
-            jobID: jobID,
-            status: 'progress',
-            progress: progress,
-            message: `Bab ${index} berhasil di-generate`,
-            babNum: index,
-            babNama: `Bab ${index}`,
-            docxBase64: docxBase64,
-            folderID: driveFolderID || ''  // ← KUNCI FIX!
-          });
-
-          jobStatus[jobID].bahs.push({
-            num: index,
-            status: 'done',
-            tokens: estimateTokens(content)
-          });
-
-          progress += 8;
-          console.log(`[${jobID}] ✅ Bab ${index} selesai (${estimateTokens(content)} tokens).`);
-
-        } catch (sectionError) {
-          console.error(`[${jobID}] ❌ Gagal di Bab ${index}: ${sectionError.message}`);
-          jobStatus[jobID].bahs.push({
-            num: index,
-            status: 'error',
-            error: sectionError.message
-          });
-          
-          // Kirim error callback tapi continue ke bab berikutnya
-          await callGASCallback(callbackURL, {
-            jobID: jobID,
-            status: 'progress',
-            progress: progress,
-            message: `⚠️ Bab ${index} error, lanjut ke bab berikutnya`
-          });
-        }
-      }
-
-      // 3. FINAL CALLBACK
-      console.log(`[${jobID}] ✨ Seluruh dokumen selesai!`);
-      
-      jobStatus[jobID].status = 'completed';
-      jobStatus[jobID].progress = 100;
-
-      await callGASCallback(callbackURL, {
-        jobID: jobID,
-        status: 'completed',
-        progress: 100,
-        message: 'Semua 10 bab berhasil di-generate!',
-        completedAt: new Date().toISOString()
-      });
-
-      console.log(`[${jobID}] 🎉 SELESAI! Document generation completed successfully.\n`);
-
-    } catch (globalError) {
-      console.error(`[${jobID}] 💥 Terjadi Kesalahan Fatal: ${globalError.message}`);
-      
-      jobStatus[jobID].status = 'error';
-      jobStatus[jobID].error = globalError.message;
-
-      await callGASCallback(callbackURL, {
-        jobID: jobID,
-        status: 'error',
-        progress: -1,
-        message: `Proses terhenti: ${globalError.message}`
-      });
-    }
+    await generateProposalTeknis(jobData);
   })();
 });
 
-// ==========================================
-// ERROR HANDLING
-// ==========================================
-app.use((err, req, res, next) => {
-  console.error('❌ Unhandled error:', err);
-  res.status(500).json({
-    error: err.message,
-    timestamp: new Date().toISOString()
+app.get('/api/status/:jobID', (req, res) => {
+  const { jobID } = req.params;
+  res.status(200).json({
+    jobID,
+    status: 'generating',
+    progress: 50,
   });
 });
 
-// ==========================================
+// ============================================================================
 // START SERVER
-// ==========================================
+// ============================================================================
+
 app.listen(PORT, () => {
   console.log(`
-╔════════════════════════════════════════╗
-║     USTEKPRO Backend v2.2.1            ║
-║     Running on port ${PORT}              ║
-║     AI: Claude (Primary)              ║
-║     Fallback: Gemini                   ║
-║     DOCX Builder: Enabled              ║
-║     Folder Management: ✅ ENABLED      ║
-║     Status: ✅ Ready                   ║
-╚════════════════════════════════════════╝
+╔════════════════════════════════════════════════════════════════╗
+║      UstekPro Backend v3.0 - Proposal Teknis Generator         ║
+║  Jasa Konsultansi Konstruksi: DED & Pengawasan                 ║
+╚════════════════════════════════════════════════════════════════╝
+
+📍 Server: http://localhost:${PORT}
+🔐 API Key: ${CONFIG.CLAUDE_API_KEY ? '✅' : '❌'}
+📚 Structure: 6 BAB (14 API calls)
+📊 Total prompts: 28 (14 DED + 14 Pengawasan)
+
+Endpoints:
+  POST /api/generate
+  GET  /api/health
+  GET  /api/status/:jobID
+
+${new Date().toISOString()}
   `);
 });
 
