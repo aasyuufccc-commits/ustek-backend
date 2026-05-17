@@ -18,7 +18,7 @@ const axios = require('axios');
 const Anthropic = require('@anthropic-ai/sdk').default;
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { buildProposalTeknis } = require('./lib/docxBuilder');
-const promptLibrary = require('./prompts');
+const promptLibrary = require('./lib/prompts');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
