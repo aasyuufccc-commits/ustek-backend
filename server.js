@@ -393,14 +393,15 @@ app.get('/api/status/:jobID', (req, res) => {
 // START SERVER
 // ============================================================================
 
-app.listen(PORT, () => {
+// Memastikan port dan host terkonfigurasi dengan benar untuk cloud environment
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ╔════════════════════════════════════════════════════════════════╗
 ║      UstekPro Backend v3.0 - Proposal Teknis Generator         ║
 ║  Jasa Konsultansi Konstruksi: DED & Pengawasan                 ║
 ╚════════════════════════════════════════════════════════════════╝
 
-📍 Server: http://localhost:${PORT}
+📍 Server: http://0.0.0.0:${PORT}
 🔐 API Key: ${CONFIG.CLAUDE_API_KEY ? '✅' : '❌'}
 📚 Structure: 6 BAB (14 API calls)
 📊 Total prompts: 28 (14 DED + 14 Pengawasan)
